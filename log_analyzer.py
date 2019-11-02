@@ -13,10 +13,8 @@ config = {
     "LOG_DIR": "./log"
 }
 
-
 def main():
     pass
-
 
 
 if __name__ == "__main__":
