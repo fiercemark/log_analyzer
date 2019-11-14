@@ -2,13 +2,15 @@
 # -*- coding: utf-8 -*-
 
 import argparse
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 import gzip
 from pathlib import Path
 import logging
 import json
-import re
 import os
+import re
+import sys
+
 
 # log_format ui_short '$remote_addr  $remote_user $http_x_real_ip [$time_local] "$request" '
 #                     '$status $body_bytes_sent "$http_referer" '
@@ -21,24 +23,162 @@ config = {
     "LOG_DIR": "./log"
 }
 
+html_template = """
+<!doctype html>
+
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>rbui log analysis report</title>
+  <meta name="description" content="rbui log analysis report">
+  <style type="text/css">
+    html, body {
+      background-color: black;
+    }
+    th {
+      text-align: center;
+      color: silver;
+      font-style: bold;
+      padding: 5px;
+      cursor: pointer;
+    }
+    table {
+      width: auto;
+      border-collapse: collapse;
+      margin: 1%;
+      color: silver;
+    }
+    td {
+      text-align: right;
+      font-size: 1.1em;
+      padding: 5px;
+    }
+    .report-table-body-cell-url {
+      text-align: left;
+      width: 20%;
+    }
+    .clipped {
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      overflow:hidden !important;
+      max-width: 700px;
+      word-wrap: break-word;
+      display:inline-block;
+    }
+    .url {
+      cursor: pointer;
+      color: #729FCF;
+    }
+    .alert {
+      color: red;
+    }
+  </style>
+</head>
+
+<body>
+  <table border="1" class="report-table">
+  <thead>
+    <tr class="report-table-header-row">
+    </tr>
+  </thead>
+  <tbody class="report-table-body">
+  </tbody>
+
+  <script type="text/javascript" src="https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
+  <script type="text/javascript" src="/Users/s.stupnikov/Dev/hive7/home/s.stupnikov/custom/analyzer/jquery.tablesorter.min.js"></script> 
+  <script type="text/javascript">
+  !function($) {
+    var table = {table_json}
+        var reportDates;
+    var columns = new Array();
+    var lastRow = 150;
+    var $table = $(".report-table-body");
+    var $header = $(".report-table-header-row");
+    var $selector = $(".report-date-selector");
+
+    $(document).ready(function() {
+      $(window).bind("scroll", bindScroll);
+        var row = table[0];
+        for (k in row) {
+          columns.push(k);
+        }
+        columns = columns.sort();
+        columns = columns.slice(columns.length -1, columns.length).concat(columns.slice(0, columns.length -1));
+        drawColumns();
+        drawRows(table.slice(0, lastRow));
+        $(".report-table").tablesorter(); 
+    });
+
+    function drawColumns() {
+      for (var i = 0; i < columns.length; i++) {
+        var $th = $("<th></th>").text(columns[i])
+                                .addClass("report-table-header-cell")
+        $header.append($th);
+      }
+    }
+
+    function drawRows(rows) {
+      for (var i = 0; i < rows.length; i++) {
+        var row = rows[i];
+        var $row = $("<tr></tr>").addClass("report-table-body-row");
+        for (var j = 0; j < columns.length; j++) {
+          var columnName = columns[j];
+          var $cell = $("<td></td>").addClass("report-table-body-cell");
+          if (columnName == "url") {
+            var url = "https://rb.mail.ru" + row[columnName];
+            var $link = $("<a></a>").attr("href", url)
+                                    .attr("title", url)
+                                    .attr("target", "_blank")
+                                    .addClass("clipped")
+                                    .addClass("url")
+                                    .text(row[columnName]);
+            $cell.addClass("report-table-body-cell-url");
+            $cell.append($link);
+          }
+          else {
+            $cell.text(row[columnName]);
+            if (columnName == "time_avg" && row[columnName] > 0.9) {
+              $cell.addClass("alert");
+            }
+          }
+          $row.append($cell);
+        }
+        $table.append($row);
+      }
+      $(".report-table").trigger("update"); 
+    }
+
+    function bindScroll() {
+      if($(window).scrollTop() == $(document).height() - $(window).height()) {
+        if (lastRow < 1000) {
+          drawRows(table.slice(lastRow, lastRow + 50));
+          lastRow += 50;
+        }
+      }
+    }
+
+  }(window.jQuery)
+  </script>
+</body>
+</html>
+"""
+
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', dest='config_path', help='config path', default='default')
+    parser.add_argument('--config', dest='config_path', help='config path', default='/usr/local/etc/config.json')
 
     return parser.parse_args()
 
 #ToDo научиться обрбатываться None в config.log_name
-def create_logger(logger_name, config, logging_level=logging.INFO):
-
-    formatter = logging.Formatter('[%(asctime)s] %(levelname).1s  '
-                                  '%(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-    logger = logging.getLogger(logger_name)
+def create_logger(name):
+    formatter = logging.Formatter('[%(asctime)s] %(levelname).1s  %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    logger = logging.getLogger(name)
     if len(logger.handlers) > 0:
         return logger
-    consoleHandler = logging.FileHandler(config.log_dir + '/log.txt')
+
+    consoleHandler = logging.FileHandler('log.txt')
     consoleHandler.setFormatter(formatter)
     logger.addHandler(consoleHandler)
-    logger.setLevel(logging_level)
 
     return logger
 
@@ -62,8 +202,14 @@ def merge_config(default_config, file_config, Config):
            log_dir=result['LOG_DIR'])
 
 
-def parse_log_name(name):
-    pass
+def parse_config(config):
+    try:
+        rs = config['REPORT_SIZE']
+        rd = config['REPORT_DIR']
+        ld = config['LOG_DIR']
+    except KeyError as e:
+        raise ValueError('Config parsing error') from e
+    return True
 
 
 def find_last_log(config, LogMeta):
@@ -81,6 +227,8 @@ def find_last_log(config, LogMeta):
 
 def get_date(file_name):
     return ''.join(file_name.split('-')[1].split('.')[:-1])
+
+#ToDo обрабатывать и логировать нормально ситуацию отсутствия report
 
 
 def find_last_report_date(config):
@@ -107,10 +255,13 @@ def check_already_done(log_meta, config):
     return False
 
 def parserline(line):
-    result = line
+    line = line.decode('utf-8').split()
+    url_path = line[6]
+    request_time = line[-1]
+    result = (url_path, request_time)
     return result
 
-def xreadlines(log_meta, parser=parserline):
+def xreadlines(log_meta, logger, parser=parserline):
     total_lines = 0
     processed = 0
     opener = gzip.open(log_meta.path, 'rb') \
@@ -125,69 +276,115 @@ def xreadlines(log_meta, parser=parserline):
                 yield parsed_line
 
 
+def cals_statistic(loglines, config_meta, log_meta, logger):
+    url_count = 0
+    total_req_time = 0.0
+    agreggatebyurl = defaultdict(lambda : defaultdict(float))
+    for line in loglines:
+        url_count += 1
+        url_path = line[0]
+        time_request = float(line[1])
+        total_req_time += time_request
+        agreggatebyurl[url_path]['count'] += 1
+        agreggatebyurl[url_path]['request_time'] += time_request
+        if agreggatebyurl[url_path]['request_time_max'] < time_request:
+            agreggatebyurl[url_path]['request_time_max'] = time_request
 
-def cals_statistic(parser, config_meta):
-    pass
+    print(url_count)
+    print(total_req_time)
+    agreggatebyurl = sorted(agreggatebyurl.items(), key=lambda item : item[1]['time_request'], reverse=True)
+    agreggatebyurl = agreggatebyurl[:config_meta.report_size]
+
+    for url, val in agreggatebyurl:
+        try:
+            yield  dict(
+                        [('url', url),
+                         ('count', val['count']),
+                         ('count_perc', val['count'] / url_count ),
+                         ('time_sum', val['request_time']),
+                         ('time_perc', val['request_time'] / total_req_time),
+                         ('time_max', val['request_time_max']),
+                         ('time_avg', val['request_time'] / val['count'])
+                         ])
+        except ZeroDivisionError as e:
+            # логирование
+            print('divizion by zero')
+            yield   dict([
+                         ('url', url),
+                         ('count', val['count']),
+                         ('count_perc',  val['count'] / url_count ),
+                         ('time_sum', val['request_time']),
+                         ('time_perc', 0.0),
+                         ('time_max', val['request_time_max']),
+                         ('time_avg', val['request_time'] / val['count'])
+                         ])
+
+# Как создать новый каталог правильно
+# if not os.path.exists(dir_path):
+#     os.makedirs(dir_path)
 
 
-def generate_report(statistic, config_meta):
-    pass
+def generate_report(statistic, config, log_meta, template):
+    result = []
+    print('Start here!!!')
+    result = list(statistic)[:10]
+    result_file = template.replace("{", "{{").replace("}", "}}").replace("{table_json}", "table_json").format(table_json=result)
+    # report-2017.06.30.html
+    report_name = 'report-' + '.'.join([log_meta.date[:4], log_meta.date[4:6], log_meta.date[6:]]) + '.html'
+    print(report_name)
+    print(os.path.join(config.report_dir, report_name))
+    with open(os.path.join(config.report_dir, report_name), 'w') as fw:
+        fw.write(result_file)
 
 
-def main(args, default_config):
+def main(args, default_config, template):
     # проверяем конфиг, если передали в --config, то передаем его в основную процедуру, иначе используем\
     # глобальный
     Config = namedtuple('Config', ['report_size', 'report_dir', 'log_dir'])
     LogMeta = namedtuple('LogMeta', ['path', 'date', 'expansion'])
 
-    if args.config_path != 'default':
-        # проверяем, что конфиг корректный.
-        # Он существует, он парсится.
-        # Парсится - в нем есть нужные поля.
-        # Взможно
-        try:
-            with open(args.config_path, 'r') as conf:
-                try:
-                    ext_config = json.loads(conf.read())
-                    # создаем namedtuple для хранения параметрам конфига
-                except json.decoder.JSONDecodeError:
-                    print('Config file {} not parse'.format(args.config_path))
-        except FileNotFoundError:
-            print('Config file {} not found'.format(args.config_path))
-    else:
-        # создаем namedtuple для хранения параметров конфига.
-        ext_config = {}
-    config = merge_config(default_config, ext_config, Config)
-    print(config)
+    # ToDo подумать, нужно ли проверять существование каталогов для конфигов и репортов.
 
-    logger_info = create_logger('info_logger', config, logging_level=logging.INFO)
-    logger_debug = create_logger('debug_logger', config, logging_level=logging.DEBUG)
-    logger_error = create_logger('error_logger', config, logging_level=logging.ERROR)
+    logger = create_logger('log analyzer')
+    config = ''
+
+    try:
+        with open(args.config_path, 'r') as conf:
+            print('try to open config')
+            ext_config = json.loads(conf.read())
+            try:
+                parse_config(ext_config)
+                config = merge_config(default_config, ext_config, Config)
+                if not config:
+                    raise ValueError('No config')
+            except ValueError as e:
+                logger.exception('Config file {} not parse. Exception: {}'.format(args.config_path, e), exc_info=True)
+    except FileNotFoundError as e:
+        logger.exception('Config file {} not found. Exception: {}'.format(args.config_path, e), exc_info=True)
+
 
 
     # возвращается namedtuple с параметрами (path, date time.date, раширение)
     log_meta = find_last_log(config, LogMeta)
-    logger_info.info('Find last log file')
+    logger.info('Find last log file: {}'.format(log_meta.path))
     print(log_meta)
 
-
-
     # # если работа уже сделана, нужно как-то скипать работу и логировать.
+    # ToDo переименовать функцию в check_report_done
     if check_already_done(log_meta, config):
-        logger_info.info('Report already created')
+        logger.info('Report already created')
         return
 
+    # возможно нужны еще какие-то расширения.
+    logger.info('Start reading log')
+    loglinesit = xreadlines(log_meta, logger, parser=parserline)
 
-    # # возможно нужны еще какие-то расширения.
-    logger_info.info('Start reading log')
-    logfiles = xreadlines(log_meta, parser=parserline)
-
-    stop = 0
-    for i in logfiles:
-        if stop == 100:
-            return
-        stop +=1
-        print(i)
+    # stop = 0
+    # for i in logfiles:
+    #     if stop == 1000:
+    #         return
+    #     stop +=1
+    #     print(i)
     # if log_meta.expansion == 'gz':
     #     with gzip.open(log_meta.path, 'rb') as f_in:
     #         parser = log_parser(f_in, log_meta)
@@ -195,10 +392,14 @@ def main(args, default_config):
     #     with open(log_meta.path, 'rb') as f_in:
     #         pass
     #
-    # staticticIT = cals_statistic(logfiles, config, log_meta)
-    #
-    # generate_report(staticticIT, config, log_meta)
+    staticticit = cals_statistic(loglinesit, config, log_meta, logger)
+    # for n, i in enumerate(staticticit):
+    #     if n >= 10:
+    #         return
+    #     print(i)
+    print(type(staticticit))
+    generate_report(staticticit, config, log_meta, template)
 
 
 if __name__ == "__main__":
-    main(parse_args(), default_config=config)
+    main(parse_args(), default_config=config, template=html_template)
