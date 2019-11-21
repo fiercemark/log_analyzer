@@ -4,7 +4,7 @@
 This is a simple Python/Flask application intended to provide a working example of Uber's external API. The goal of these endpoints is to be simple, well-documented and to provide a base for developers to develop other applications off of.
 
 
-How To Use This
+Usage example (How to use)
 ---------------
 
 1. Navigate over to https://developer.uber.com/, and sign up for an Uber developer account.
@@ -23,4 +23,4 @@ Testing
 2. Run the command `make test`
 3. If you delete the fixtures, or decide to add some of your own, you’ll have to re-generate them, and the way this is done is by running the app, getting an auth_token from the main page of the app. Paste that token in place of the `test_auth_token` at the top of the `test_endpoints.py` file, then run the tests.
 
-
+greate way to editing README - https://dillinger.io/

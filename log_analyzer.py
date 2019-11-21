@@ -3,14 +3,14 @@
 
 import argparse
 from collections import namedtuple, defaultdict
+from datetime import datetime
 import gzip
-from pathlib import Path
-import logging
 import json
+import logging
+from statistics import median
 import os
 import re
 import sys
-
 
 # log_format ui_short '$remote_addr  $remote_user $http_x_real_ip [$time_local] "$request" '
 #                     '$status $body_bytes_sent "$http_referer" '
@@ -18,12 +18,13 @@ import sys
 #                     '$request_time';
 
 config = {
-    "REPORT_SIZE": 1000,
-    "REPORT_DIR": "./reports",
-    "LOG_DIR": "./log"
+    'REPORT_SIZE': 1000,
+    'REPORT_DIR': './reports',
+    'LOG_DIR': './log'
 }
 
-html_template = """
+
+html_template = '''
 <!doctype html>
 
 <html lang="en">
@@ -85,7 +86,8 @@ html_template = """
   </tbody>
 
   <script type="text/javascript" src="https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
-  <script type="text/javascript" src="/Users/s.stupnikov/Dev/hive7/home/s.stupnikov/custom/analyzer/jquery.tablesorter.min.js"></script> 
+  <script type="text/javascript" 
+  src="/Users/s.stupnikov/Dev/hive7/home/s.stupnikov/custom/analyzer/jquery.tablesorter.min.js"></script> 
   <script type="text/javascript">
   !function($) {
     var table = {table_json}
@@ -161,245 +163,233 @@ html_template = """
   </script>
 </body>
 </html>
-"""
+'''
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', dest='config_path', help='config path', default='/usr/local/etc/config.json')
-
     return parser.parse_args()
 
-#ToDo научиться обрбатываться None в config.log_name
-def create_logger(name):
+
+def create_logger(log_path):
     formatter = logging.Formatter('[%(asctime)s] %(levelname).1s  %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-    logger = logging.getLogger(name)
-    if len(logger.handlers) > 0:
-        return logger
+    logger = logging.getLogger('log_analyzer')
 
-    consoleHandler = logging.FileHandler('log.txt')
-    consoleHandler.setFormatter(formatter)
-    logger.addHandler(consoleHandler)
+    if log_path:
+        log_dir = os.path.split(log_path)[0]
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
 
+    log_hadler = logging.FileHandler(log_path) if log_path else logging.StreamHandler()
+    log_hadler.setFormatter(formatter)
+    logger.addHandler(log_hadler)
+    logger.setLevel(logging.INFO)
     return logger
 
 
-def check_exists_config(config_path):
-    pass
-
-def check_parse_config(config_path):
-    pass
-
-def merge_config(default_config, file_config, Config):
+def merge_config(default_config, file_config):
     result = {}
-    for k, v in default_config.items():
+
+    default_keys = default_config.keys()
+    file_config_keys = file_config.keys()
+
+    for k in set(list(default_keys) + list(file_config_keys)):
         if k in file_config:
             result[k] = file_config[k]
         else:
             result[k] = default_config[k]
 
-    return Config(report_size=result['REPORT_SIZE'],
-           report_dir=result['REPORT_DIR'],
-           log_dir=result['LOG_DIR'])
-
-
-def parse_config(config):
-    try:
-        rs = config['REPORT_SIZE']
-        rd = config['REPORT_DIR']
-        ld = config['LOG_DIR']
-    except KeyError as e:
-        raise ValueError('Config parsing error') from e
-    return True
+    return result
 
 
 def find_last_log(config, LogMeta):
-    re_file_name = re.compile(r'(^nginx-access-ui\.log-([0-9]+)?(\.gz)?)?$')
-    file_array_it = (re_file_name.match(file).group(1) for file in os.listdir(config.log_dir) if re_file_name.match(file))
-    reDate = re.compile((r'([0-9]+)'))
-    last_file = sorted([x for x in file_array_it], key=lambda x: reDate.match(x.split('-')[-1]).group(1), reverse=True)[0]
+    last_file = None
+    last_file_date = None
+
+    re_file_name = re.compile(r'(^nginx-access-ui\.log-(?P<date>[0-9]+)?(\.gz)?)?$')
+    redate = re.compile((r'([0-9]+)'))
+
+    if not os.path.exists(config.LOG_DIR):
+        return None
+    file_array_it = (re_file_name.match(file).group(1) for file in os.listdir(config.LOG_DIR) if re_file_name.match(file))
+
+    for file in file_array_it:
+        date_parse = redate.match(file.split('-')[-1]).group(1)
+        try:
+            date = datetime.strptime(date_parse, '%Y%m%d')
+        except ValueError:
+            logging.exception('Wrong date in log file', exc_info=True)
+            continue
+
+        if not last_file or date > last_file_date:
+            last_file = file
+            last_file_date = date
+
+    if not last_file:
+        return None
 
     if re_file_name.match(last_file).group(3) == '.gz':
         expansion = '.gz'
     else:
         expansion = ''
-    return LogMeta(path=config.log_dir + '/' + last_file, date=reDate.match(last_file.split('-')[-1]).group(1),
+
+    return LogMeta(path=config.LOG_DIR + '/' + last_file, date=redate.match(last_file.split('-')[-1]).group(1),
                                             expansion=expansion)
+
 
 def get_date(file_name):
     return ''.join(file_name.split('-')[1].split('.')[:-1])
 
-#ToDo обрабатывать и логировать нормально ситуацию отсутствия report
 
-
-def find_last_report_date(config):
-    last_report_date = ''
-    try:
-        dir_content = os.listdir(config.report_dir)
-    except FileNotFoundError as e:
-        # logging
-        print(e)
-        pass
-    else:
-        file_array_it = (get_date(file) for file in dir_content)
-        last_report_date = sorted([file_date for file_date in file_array_it], reverse=True)[0]
-
-    print('last_report_date: {}'.format(last_report_date))
-
-    return last_report_date
-
-def check_already_done(log_meta, config):
-    last_report_date = find_last_report_date(config)
-    if last_report_date == log_meta.date:
-        print('report True')
+def check_current_report_done(log_meta, config):
+    file_array_it = (get_date(file) for file in os.listdir(config.REPORT_DIR))
+    reports = set([report_date for report_date in file_array_it if log_meta.date == report_date])
+    if reports:
         return True
     return False
 
+
 def parserline(line):
-    line = line.decode('utf-8').split()
-    url_path = line[6]
-    request_time = line[-1]
+    parse_regexp = r'(^\S+ )\S+\s+\S+ (\[\S+ \S+\] )' \
+                   r'(\"\S+ (\S+) \S+\") \d+ \d+ \"\S+\" ' \
+                   r'\".*\" \"\S+\" \"\S+\" \"\S+\" (\d+\.\d+)'
+    regex = re.compile(parse_regexp)
+    if not regex.match(line):
+        return None
+    url_path = regex.match(line).group(4)
+    request_time = float(regex.match(line).group(5))
     result = (url_path, request_time)
     return result
 
-def xreadlines(log_meta, logger, parser=parserline):
+
+def xreadlines(log_meta, logger, parser=parserline, errors_limit=None):
     total_lines = 0
     processed = 0
+    error = 0
     opener = gzip.open(log_meta.path, 'rb') \
                     if log_meta.expansion == '.gz' \
-                    else open(log_meta.path)
+                    else open(log_meta.path, 'rb')
     with opener as log:
         for line in log:
             total_lines += 1
+            line = line.decode('utf-8')
             parsed_line = parser(line)
-            if parsed_line:
-                processed += 1
-                yield parsed_line
+            if not parsed_line:
+                error += 1
+                continue
+
+            processed += 1
+            yield parsed_line
+
+    if errors_limit is not None and total_lines > 0 and error / float(total_lines) > errors_limit:
+        raise RuntimeError('To much errors in log!')
 
 
-def cals_statistic(loglines, config_meta, log_meta, logger):
+def update_statistic_store(store, url, response_time):
+    rec = store.get(url)
+    if not rec:
+        rec = {
+            'url': url,
+            'request_count': 0,
+            'response_time_sum': response_time,
+            'max_response_time': response_time,
+            'avg_responce_time': 0.,
+            'all_responce_time': []
+        }
+        store[url] = rec
+
+    rec['request_count'] += 1
+    rec['response_time_sum'] += response_time
+    rec['max_response_time'] = max(store[url]['max_response_time'], response_time)
+    rec['avg_responce_time'] = rec['response_time_sum'] / rec['request_count']
+    rec['all_responce_time'].append(response_time)
+
+
+def cals_statistic(log_lines, config_meta):
     url_count = 0
     total_req_time = 0.0
-    agreggatebyurl = defaultdict(lambda : defaultdict(float))
-    for line in loglines:
+    store = {}
+    for url, request_time in log_lines:
         url_count += 1
-        url_path = line[0]
-        time_request = float(line[1])
-        total_req_time += time_request
-        agreggatebyurl[url_path]['count'] += 1
-        agreggatebyurl[url_path]['request_time'] += time_request
-        if agreggatebyurl[url_path]['request_time_max'] < time_request:
-            agreggatebyurl[url_path]['request_time_max'] = time_request
+        total_req_time += request_time
+        update_statistic_store(store, url, request_time)
+    agreggatebyurl = sorted(store.items(), key=lambda item : item[1]['avg_responce_time'], reverse=True)
+    if config_meta.REPORT_SIZE > len(agreggatebyurl):
+        agreggatebyurl = agreggatebyurl[:config_meta.REPORT_SIZE]
 
-    print(url_count)
-    print(total_req_time)
-    agreggatebyurl = sorted(agreggatebyurl.items(), key=lambda item : item[1]['time_request'], reverse=True)
-    agreggatebyurl = agreggatebyurl[:config_meta.report_size]
-
+    #
     for url, val in agreggatebyurl:
-        try:
-            yield  dict(
-                        [('url', url),
-                         ('count', val['count']),
-                         ('count_perc', val['count'] / url_count ),
-                         ('time_sum', val['request_time']),
-                         ('time_perc', val['request_time'] / total_req_time),
-                         ('time_max', val['request_time_max']),
-                         ('time_avg', val['request_time'] / val['count'])
-                         ])
-        except ZeroDivisionError as e:
-            # логирование
-            print('divizion by zero')
-            yield   dict([
-                         ('url', url),
-                         ('count', val['count']),
-                         ('count_perc',  val['count'] / url_count ),
-                         ('time_sum', val['request_time']),
-                         ('time_perc', 0.0),
-                         ('time_max', val['request_time_max']),
-                         ('time_avg', val['request_time'] / val['count'])
-                         ])
-
-# Как создать новый каталог правильно
-# if not os.path.exists(dir_path):
-#     os.makedirs(dir_path)
+        yield  {
+                'url': url,
+                'count': val['request_count'],
+                'count_perc': round((val['request_count'] / url_count) * 100.0, 5) ,
+                'time_sum': round(val['response_time_sum'], 5),
+                'time_med': round(median(val['all_responce_time']), 5),
+                'time_perc': round((val['response_time_sum'] / total_req_time) * 100.0, 5),
+                'time_max': round(val['max_response_time'], 5),
+                'time_avg': round(val['response_time_sum'] / val['request_count'], 5)
+        }
 
 
 def generate_report(statistic, config, log_meta, template):
-    result = []
-    print('Start here!!!')
-    result = list(statistic)[:10]
-    result_file = template.replace("{", "{{").replace("}", "}}").replace("{table_json}", "table_json").format(table_json=result)
-    # report-2017.06.30.html
+    result_file = template.replace("{", "{{").replace("}", "}}").replace("{table_json}", "table_json").\
+                                                                format(table_json=list(statistic))
     report_name = 'report-' + '.'.join([log_meta.date[:4], log_meta.date[4:6], log_meta.date[6:]]) + '.html'
-    print(report_name)
-    print(os.path.join(config.report_dir, report_name))
-    with open(os.path.join(config.report_dir, report_name), 'w') as fw:
+
+    if not os.path.exists(config.REPORT_DIR):
+        os.makedirs(config.REPORT_DIR)
+
+    with open(os.path.join(config.REPORT_DIR, report_name), 'wb') as fw:
+        result_file = result_file.encode('utf-8')
         fw.write(result_file)
 
 
-def main(args, default_config, template):
-    # проверяем конфиг, если передали в --config, то передаем его в основную процедуру, иначе используем\
-    # глобальный
-    Config = namedtuple('Config', ['report_size', 'report_dir', 'log_dir'])
+def main(config, logger, template):
     LogMeta = namedtuple('LogMeta', ['path', 'date', 'expansion'])
-
-    # ToDo подумать, нужно ли проверять существование каталогов для конфигов и репортов.
-
-    logger = create_logger('log analyzer')
-    config = ''
-
-    try:
-        with open(args.config_path, 'r') as conf:
-            print('try to open config')
-            ext_config = json.loads(conf.read())
-            try:
-                parse_config(ext_config)
-                config = merge_config(default_config, ext_config, Config)
-                if not config:
-                    raise ValueError('No config')
-            except ValueError as e:
-                logger.exception('Config file {} not parse. Exception: {}'.format(args.config_path, e), exc_info=True)
-    except FileNotFoundError as e:
-        logger.exception('Config file {} not found. Exception: {}'.format(args.config_path, e), exc_info=True)
-
-
-
-    # возвращается namedtuple с параметрами (path, date time.date, раширение)
     log_meta = find_last_log(config, LogMeta)
-    logger.info('Find last log file: {}'.format(log_meta.path))
-    print(log_meta)
-
-    # # если работа уже сделана, нужно как-то скипать работу и логировать.
-    # ToDo переименовать функцию в check_report_done
-    if check_already_done(log_meta, config):
-        logger.info('Report already created')
+    if not log_meta:
+        logger.info('Sorry. No log yet!!!!')
         return
+    logger.info('Find last log file: {}'.format(log_meta.path))
 
-    # возможно нужны еще какие-то расширения.
+    logger.info('Check report')
+    if os.path.exists(config.REPORT_DIR) and os.listdir(config.REPORT_DIR):
+        exist = check_current_report_done(log_meta, config)
+        if exist:
+            logger.info('Report already created')
+            return
+
     logger.info('Start reading log')
-    loglinesit = xreadlines(log_meta, logger, parser=parserline)
+    try:
+        log_lines_it = xreadlines(log_meta, logger, parser=parserline)
+        print(list(log_lines_it)[:10])
+    except RuntimeError as e:
+        logger.exception('msg: {}'.format(e), exc_info=True)
 
-    # stop = 0
-    # for i in logfiles:
-    #     if stop == 1000:
-    #         return
-    #     stop +=1
-    #     print(i)
-    # if log_meta.expansion == 'gz':
-    #     with gzip.open(log_meta.path, 'rb') as f_in:
-    #         parser = log_parser(f_in, log_meta)
-    # else:
-    #     with open(log_meta.path, 'rb') as f_in:
-    #         pass
-    #
-    staticticit = cals_statistic(loglinesit, config, log_meta, logger)
-    # for n, i in enumerate(staticticit):
-    #     if n >= 10:
-    #         return
-    #     print(i)
-    print(type(staticticit))
+    staticticit = cals_statistic(log_lines_it, config)
+    logger.info('Calc Statistic finish')
+    print(list(staticticit)[:10])
     generate_report(staticticit, config, log_meta, template)
+    logger.info('Generate statistic finish')
 
 
 if __name__ == "__main__":
-    main(parse_args(), default_config=config, template=html_template)
+    args = parse_args()
+
+    if args.config_path:
+        with open(args.config_path, 'rb') as conf:
+            ext_config = json.load(conf, encoding='utf-8')
+
+    merged_config = merge_config(config, ext_config)
+
+    logger = create_logger(merged_config.get('SCRIPT_LOG_PATH'))
+    logger.info('Analyzer start work')
+
+    Config = namedtuple('Config', sorted(merged_config))
+    config = Config(**merged_config)
+
+    try:
+        main(config, logger, template=html_template)
+    except:
+        logger.exception('Something wrong')
